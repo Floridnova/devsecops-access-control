@@ -429,6 +429,10 @@ Invalid configuration:
   - JWT_SECRET is missing
   - JWT_ISSUER is missing
   - JWT_AUDIENCE is missing
+
+3.Run URL: https://github.com/Floridnova/devsecops-access-control/actions/runs/43494424541
+  Log line: DINEDESK_DEMO_KEY is configured
+  I deleted the DINEDESK_DEMO_KEY secret after the run.
 ==========================================================================
 TASK 6: (to be completed)
 ==========================================================================
