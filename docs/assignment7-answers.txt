@@ -1,6 +1,10 @@
 ASSIGNMENT 7: Securing Access and Secrets in the DineDesk API
 Student: Etsub
 Repository: devsecops-access-control (public)
+Repository link: https://github.com/Floridnova/devsecops-access-control
+Note: the repository is public, so I could not keep it private with the
+instructor as a collaborator; I am saying so here as the assignment asks.
+No real secret is committed anywhere in it; every value is invented.
 
 ==========================================================================
 TASK 1: Concepts
@@ -357,7 +361,7 @@ them. The other flaws need a logged-in user or a leaked secret first, but
 this one needs nothing at all.
 
 ==========================================================================
-TASK 3: Build Role- and Permission-Based Access Control   
+TASK 3: Build Role- and Permission-Based Access Control
 ==========================================================================
 
 6. My routes check a permission like orders:create instead of a list of role
@@ -374,6 +378,7 @@ change: GET /api/orders already requires orders:read, so kitchen can use it,
 and POST /api/orders requires orders:create, so kitchen gets a 403. If the
 routes had listed role names, I would have had to edit every route that
 kitchen needs.
+
 ==========================================================================
 TASK 4: Branch-Level Authorization and Tests
 ==========================================================================
@@ -389,8 +394,28 @@ Requirement 2
 GET /api/reports/branch never reads req.query. It builds the report from
 req.user.branchId, which comes from the verified token and our own user
 records. The test "Piassa manager with ?branchId=bole still gets only
-Piassa data" and the two PowerShell calls above show both URLs return the
+Piassa data" and the two PowerShell calls below show both URLs return the
 same Piassa report.
+
+Demonstration (logged in as the seeded Piassa manager; the token is not
+shown):
+
+  $body = @{ email = "<piassa manager seed email>"; password = "<seed password>" } | ConvertTo-Json
+  $login = Invoke-RestMethod -Method Post -Uri http://localhost:3000/api/auth/login -ContentType "application/json" -Body $body
+  $h = @{ Authorization = "Bearer $($login.token)" }
+
+  > Invoke-RestMethod -Uri "http://localhost:3000/api/reports/branch" -Headers $h
+  branchId orderCount totalSales
+  -------- ---------- ----------
+  piassa            2        520
+
+  > Invoke-RestMethod -Uri "http://localhost:3000/api/reports/branch?branchId=bole" -Headers $h
+  branchId orderCount totalSales
+  -------- ---------- ----------
+  piassa            2        520
+
+Both calls return exactly the same Piassa data, so the branchId in the URL
+is ignored.
 
 Requirement 3
 I chose 404 for another branch's order. With 403 the API would confirm
@@ -407,11 +432,49 @@ Time:        4.278 s
 Ran all test suites.
 
 Requirement 5
+With canAccessOrder changed to return true for everyone:
 Test Suites: 1 failed, 1 total
 Tests:       4 failed, 15 passed, 19 total
 Snapshots:   0 total
 Time:        4.13 s
 Ran all test suites.
+
+After restoring the policy function, all tests pass again (npm test
+--verbose):
+
+ PASS  tests/dinedesk.test.js
+  authentication
+    √ no token -> 401 (57 ms)
+    √ malformed Authorization header -> 401 (8 ms)
+    √ token signed with the wrong key -> 401 (8 ms)
+    √ expired token -> 401 (5 ms)
+    √ token with alg "none" -> 401 (6 ms)
+    √ wrong email and wrong password give the same generic error (205 ms)
+    √ login ignores a role sent in the body (95 ms)
+  roles and permissions
+    √ waiter calling GET /api/admin/users -> 403 (91ms)
+    √ administrator calling GET /api/admin/users -> 200 with no password hashes (79 ms)
+    √ waiter creating an order -> 201 (80 ms)
+    √ cashier creating an order -> 403 (80 ms)
+    √ a branchId in the order body is ignored (78 ms)
+    √ an unknown role has no permissions
+  branch-level authorization
+    √ Bole manager reading a Bole order -> 200 (84 ms)
+    √ Bole manager reading a Piassa order -> 404, same as a missing order (98 ms)
+    √ the order list only contains the user's own branch (80 ms)
+    √ administrator can read an order from any branch (79 ms)
+    √ waiter calling GET /api/reports/branch -> 403 (88 ms)
+    √ Piassa manager with ?branchId=bole still gets only Piassa data (88 ms)
+
+  Test Suites: 1 passed, 1 total
+  Tests:       19 passed, 19 total
+  Snapshots:   0 total
+  Time:        3.524 s, estimated 5 s
+  Ran all test suites.
+
+(The "console.error ◇ injected env (0) from .env" line printed above the
+results is only dotenv's own start-up message saying it loaded 0 variables
+from .env; it is not a test failure and contains no value.)
 
 Requirement 6
 The tests get their signing key from tests/setup-env.js, which Jest loads
@@ -421,18 +484,262 @@ at all, so it works on pull requests and nothing real can leak.
 Green run: https://github.com/Floridnova/devsecops-access-control/actions/runs/43481968762
 
 ==========================================================================
-TASK 5: (to be completed)
+TASK 5: Secrets Management
 ==========================================================================
-1.
- ◇ injected env (0) from .env
-Invalid configuration:
-  - JWT_SECRET is missing
-  - JWT_ISSUER is missing
-  - JWT_AUDIENCE is missing
 
-3.Run URL: https://github.com/Floridnova/devsecops-access-control/actions/runs/43494424541
-  Log line: DINEDESK_DEMO_KEY is configured
-  I deleted the DINEDESK_DEMO_KEY secret after the run.
+1. Configuration
+All configuration is read once in src/config/index.js. It checks that
+JWT_SECRET, JWT_ISSUER and JWT_AUDIENCE exist and that JWT_SECRET is at
+least 32 characters long. If a check fails it throws an error that names
+the setting and never prints a value, and the server does not start.
+
+Output of starting the API with JWT_SECRET missing (the issuer and audience
+were also unset in this run, and the settings are named, not their values):
+
+  ◇ injected env (0) from .env
+  Invalid configuration:
+    - JWT_SECRET is missing
+    - JWT_ISSUER is missing
+    - JWT_AUDIENCE is missing
+
+2. Local files
+.env.example contains only names and safe placeholders:
+  JWT_SECRET=replace-with-a-random-string-of-at-least-32-characters
+  JWT_ISSUER=dinedesk-api
+  JWT_AUDIENCE=dinedesk-staff
+.env is ignored through line 4 of .gitignore.
+
+  > git check-ignore -v .env
+  .gitignore:4:.env       .env
+
+  > git ls-files | Select-String env
+  .env.example
+  tests/setup-env.js
+
+(Select-String is the PowerShell equivalent of grep. The second line only
+matches because its name contains "env"; the real .env is not tracked.)
+
+Why adding .env to .gitignore would NOT have fixed the old repository:
+.gitignore only stops Git from picking up files that are not yet tracked, so
+a .env that was already committed stays tracked and every old commit still
+contains its secrets.
+
+3. A GitHub Actions secret
+I created a repository secret named DINEDESK_DEMO_KEY with an invented
+value. The workflow .github/workflows/check-secret.yml is triggered
+manually (workflow_dispatch), has permissions: contents: read, and passes
+the secret to a single step through env:. It checks whether the secret is
+set and prints only a message, never the value:
+
+  name: Verify demo secret
+  on: workflow_dispatch
+  permissions:
+    contents: read
+  jobs:
+    check-secret:
+      runs-on: ubuntu-latest
+      steps:
+        - name: Check DINEDESK_DEMO_KEY is configured
+          env:
+            DINEDESK_DEMO_KEY: ${{ secrets.DINEDESK_DEMO_KEY }}
+          run: |
+            if [ -z "$DINEDESK_DEMO_KEY" ]; then
+              echo "DINEDESK_DEMO_KEY is NOT configured"
+              exit 1
+            fi
+            echo "DINEDESK_DEMO_KEY is configured"
+
+Run URL: https://github.com/Floridnova/devsecops-access-control/actions/runs/43494424541
+Log line: DINEDESK_DEMO_KEY is configured
+
+My first two runs (#1 and #2) failed with "DINEDESK_DEMO_KEY is NOT
+configured" because the secret had not been created yet, which shows the
+check works. After I created the secret, the run above was green.
+
+I deleted the DINEDESK_DEMO_KEY secret after the run.
+
+4. Which lines can leak the secret
+
+run: echo "$DINEDESK_DEMO_KEY"
+  GitHub masks the exact value and shows ***, so it is normally hidden in
+  the log, but it should still never be done because masking is only a
+  safeguard (and it prints the value to anything else reading stdout).
+
+run: echo "$DINEDESK_DEMO_KEY" | base64
+  Yes, it leaks: masking only matches the exact original string, so the
+  base64 version is printed in full and anyone can decode it in seconds.
+
+run: ./deploy.sh --token "$DINEDESK_DEMO_KEY"
+  It can leak: a command-line argument is visible in the process list and
+  can be echoed by the script, by set -x or by an error message, so the
+  secret should be passed to the script through env: instead.
+
+a third-party action referenced as some-user/action@main
+  Yes, it can leak: the author can change what @main runs at any time, and
+  the action runs inside the job where it can read any secret that step
+  receives, so it must be reviewed and pinned to a full commit SHA.
+
+5. Incident response: the payment API key pushed to a public repo 20
+   minutes ago
+
+  1. Revoke / rotate the key in the payment provider's dashboard, so the
+     exposed value stops working.
+  2. Investigate: read the provider's logs to see whether the old key was
+     used, from where, and for what (payments, refunds, data reads).
+     Report anything suspicious to the provider and the company.
+  3. Put the new key in the secret store / server environment variables
+     (never in code), and redeploy the API so it works again.
+  4. Remove the key from the source: delete it from the code, make sure
+     .env is untracked and ignored, and if wanted clean the history
+     (git filter-repo) and force-push.
+  5. Review logs, forks, CI logs and any other place the key may have been
+     copied to.
+  6. Rescan and verify: run a secret scanner (for example gitleaks or
+     GitHub secret scanning), turn on push protection, and confirm the old
+     key now returns an authentication error.
+
+Why the first step is first: automated bots watch public repositories and
+use new keys within minutes, so the only thing that stops damage right now
+is making the exposed value useless; every other step can happen while the
+old key is already dead.
+
+Why deleting the commit is not enough: the key is still in the Git
+history, in every clone and fork made in those 20 minutes, in caches and in
+anything a bot already copied, and deleting a value never makes it stop
+working. Only rotating the key does.
+
+6. Card payments in the React app
+The payment provider's SECRET key must live only on the server: in an
+environment variable (or a secrets manager) read by the Express API through
+the config module, and never sent to a browser. It cannot be a VITE_
+variable because Vite compiles every VITE_ variable into the JavaScript
+bundle that every visitor downloads, so anybody could open the dev tools
+and copy it, then create charges or refunds on the company's account.
+
+The browser gets a payment done like this: the React app sends the order id
+to our own API (POST /api/payments, which is authenticated and needs
+payments:create); the server uses the secret key to ask the provider to
+create a payment session / payment intent and returns only a short-lived
+session id or client token; the browser then uses the provider's
+PUBLISHABLE key (which is designed to be public and can only start a
+payment, not read or refund one) together with that session to collect the
+card, and the card details go straight to the provider. The server confirms
+the result with the provider; the secret key never leaves the server.
+
 ==========================================================================
-TASK 6: (to be completed)
+TASK 6: Design and Review
 ==========================================================================
+
+1. End-to-end security model
+(The module in brackets is the one where the control first appeared;
+"ext. 7" means Module 7 extended it.)
+
+  Request from the React app (tablet)
+        |
+        v
+  +--------------------------------------------------------------------+
+  | AUTHENTICATION                                                     |
+  |  - bcrypt password hashing                    (Module 2, code in 3)|
+  |  - one generic login error                    (Module 3)           |
+  |  - JWT with short expiry (15m) and issuer     (Module 3; ext. 7:   |
+  |    plus audience, algorithm allowlist)         audience, revocation)|
+  |  - authenticate middleware: jwt.verify,       (Module 3; ext. 7)   |
+  |    Bearer only, 401 on any failure                                 |
+  |  - MFA for managers and admins (recommended)  (Module 2; ext. 7)   |
+  +--------------------------------------------------------------------+
+        |  req.user (from the verified token only)
+        v
+  +--------------------------------------------------------------------+
+  | AUTHORIZATION                                                      |
+  |  - broken access control as a top risk        (Module 2)           |
+  |  - deny by default / least privilege          (Module 2)           |
+  |  - requireRole on a route                     (Module 3)           |
+  |  - role -> permission table, requirePermission (Module 7)          |
+  |  - ownership check, 404 for "not yours"       (Module 2 and 3;     |
+  |    -> branch policy canAccessOrder             ext. 7)             |
+  +--------------------------------------------------------------------+
+        |
+        v
+  +--------------------------------------------------------------------+
+  | PROTECTED APPLICATION                                              |
+  |  - only permitted actions on the user's own branch                 |
+  |  - tests for allowed AND denied requests      (Module 2; ext. 7)   |
+  |  - tests run in GitHub Actions on every push  (Module 6)           |
+  +--------------------------------------------------------------------+
+
+  SECRETS MANAGEMENT UNDER EVERY LAYER
+  - secrets from environment variables, .env in
+    .gitignore, .env.example                       (Module 1)
+  - config validated at startup, refuses to start  (Module 7)
+  - limited database user                          (Module 4)
+  - GitHub Actions secrets, never in workflow YAML (Module 6)
+  - secret scanning / push protection              (Module 6)
+  - rotate first when a secret leaks               (Module 6)
+  - workflow permissions: contents: read, secret
+    passed to one step via env:                    (Module 7; environment
+                                                    separation in Module 6)
+
+2. Least privilege
+
+  Identity                  Needs                         Must NOT be able to
+  ------------------------  ----------------------------  ---------------------------
+  Piassa waiter account     orders:create and orders:read Read Bole's orders or any
+                            for Piassa's orders only      report, or call /api/admin/*
+  Database user the API     SELECT/INSERT/UPDATE on the   Be a superuser: drop tables,
+  connects as               tables the API uses           or change other databases
+  CI workflow that runs     contents: read, and a fake    Write to the repository or
+  the tests                 test-only JWT_SECRET          read real production secrets
+  Payment provider API key  Create payments for           Refund everything or read all
+                            DineDesk, restricted to the   customer data (use a
+                            needed permissions and the    restricted key, never one
+                            server's IP if possible       that is in the browser)
+
+3. Revocation story
+In my implementation the Bole manager's access stops when their access
+token expires. The lifetime is 15 minutes by default (src/config/index.js:
+JWT_EXPIRES_IN defaults to "15m", and src/routes/auth.js signs with it).
+The API has no refresh tokens and does not look the user up on every
+request, so a token issued just before 10:00 stays valid until about 10:15,
+even though the manager was dismissed at 10:00. I chose a short lifetime to
+keep that window small. With more time I would add refresh tokens that the
+administrator can delete, and an "is this user still active?" check on
+sensitive routes, which would cut access at once.
+
+4. Authorization design checklist (Module 7, section 23)
+
+  1. Deny access by default: YES. permissions.js gives an unknown role no
+     permissions; test "an unknown role has no permissions"
+     (tests/dinedesk.test.js).
+  2. Check permissions on the server, not only in the frontend: YES. Every
+     route uses requirePermission / requireRole on the server; there is no
+     frontend in this API.
+  3. Check ownership and tenant boundaries (branch): YES. canAccessOrder in
+     src/policies/orderPolicy.js, used by GET /api/orders and
+     /api/orders/:id; the report uses req.user.branchId.
+  4. Keep administrative permissions separate: YES. users:manage is only on
+     the admin role and /api/admin/users uses requireRole("admin").
+  5. Check on every sensitive operation, not once at login: PARTLY. Roles,
+     permissions and branch are checked by middleware on every request, but
+     the user record is not re-checked, so a dismissed account keeps working
+     until its token expires (see question 3).
+  6. Never trust role, user or tenant ids supplied by the client: YES.
+     req.user comes only from the verified token and our own users; role
+     headers, the body and ?branchId= are ignored (test: "Piassa manager
+     with ?branchId=bole still gets only Piassa data").
+  7. Accept only the fields a client may set: YES. A role sent in the login
+     body is ignored (test "login ignores a role sent in the body"), and a
+     branchId sent in the order body is ignored, because the order's branch
+     comes from req.user (test "a branchId in the order body is ignored").
+  8. Test both permitted AND denied requests: YES. 19 tests; they include
+     the denied cases (401, 403, 404), and when canAccessOrder returned true
+     for everyone 4 tests failed.
+
+5. A control from an earlier module
+Keeping secrets out of the code with environment variables and a .env file
+in .gitignore was first met in Module 1 (add .env to .gitignore before the
+first commit). Module 7 extended it: the config module now validates every
+setting at startup and refuses to run if the signing key is missing or
+shorter than 32 characters, .env.example documents the names with
+placeholders only, and I learned that .gitignore does not help once a file
+is already committed, so an exposed secret must be rotated (the rotate-first
+order from Module 6).
