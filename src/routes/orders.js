@@ -1,20 +1,25 @@
 const express = require("express");
 const authenticate = require("../middleware/authenticate");
 const requirePermission = require("../middleware/requirePermission");
+const { canAccessOrder } = require("../policies/orderPolicy");
 const { orders, findOrderById, createOrder } = require("../data/seed");
 
 const router = express.Router();
 router.use(authenticate);
 
-// TEMPORARY until Task 4: returns every branch's orders. Do not submit like this.
+// Any authenticated staff member, but only orders the policy allows.
 router.get("/", (req, res) => {
-  res.json(orders);
+  res.json(orders.filter((order) => canAccessOrder(req.user, order)));
 });
 
-// TEMPORARY until Task 4: no branch check.
 router.get("/:id", requirePermission("orders:read"), (req, res) => {
   const order = findOrderById(req.params.id);
-  if (!order) return res.status(404).json({ error: "Not found" });
+
+  // A missing order and an order from another branch get the SAME answer (404),
+  // so nobody can use the API to find out which order ids exist elsewhere.
+  if (!order || !canAccessOrder(req.user, order)) {
+    return res.status(404).json({ error: "Not found" });
+  }
   res.json(order);
 });
 
