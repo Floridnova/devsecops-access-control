@@ -1,0 +1,377 @@
+ASSIGNMENT 7: Securing Access and Secrets in the DineDesk API
+Student: Etsub
+Repository: devsecops-access-control (private, instructor added as collaborator)
+
+==========================================================================
+TASK 1: Concepts
+==========================================================================
+
+1.
+Authentication is checking who you are, for example with a password or a
+token. Authorization is checking what you are allowed to do once the system
+knows who you are. Authentication comes first, and authorization is decided
+after it for every request.
+
+401 example: a waiter's tablet sends GET /api/orders with no Authorization
+header, or with an expired token. The server cannot tell who is asking, so
+it answers 401 Unauthorized.
+
+403 example: a logged-in waiter sends GET /api/admin/users with a valid
+token. The server knows exactly who the waiter is, but waiters are not
+allowed to list staff accounts, so it answers 403 Forbidden.
+
+2.
+(a) A JWT has three parts separated by dots:
+  - Header: says which algorithm signs the token (for example HS256) and
+    that it is a JWT.
+  - Payload: the claims, such as sub (user id), role, branchId, iss, aud
+    and exp.
+  - Signature: made from the header, the payload and a secret key. It lets
+    the server see if anyone changed the token.
+
+(b) No, the payload is not encrypted. It is only Base64URL encoded, so
+anyone who has the token can decode and read it. The signature only stops
+people from changing it, it does not hide it. This means nothing secret
+can go in the payload: no passwords, no password hashes, no card numbers.
+Only small things the server needs, like the user id, role and branch.
+
+(c) Four things the server must check:
+  1. The signature. If it is skipped, an attacker can write their own
+     token with role "admin" and the server will believe it.
+  2. The algorithm (use an allowlist such as ["HS256"]). If it is
+     skipped, an attacker can send a token with alg "none" or switch the
+     algorithm, and get a token accepted without a real signature.
+  3. The expiry (exp). If it is skipped, a stolen or old token works
+     forever, even for staff who have left.
+  4. The issuer and audience (iss and aud). If they are skipped, a token
+     made for a different app or service using the same key could be
+     accepted by DineDesk.
+
+3.
+(a) It is both, but they do different jobs. OAuth 2.0 is about
+authorization: it lets an app get limited access to something on the
+user's behalf using an access token. OpenID Connect is a layer on top of
+OAuth 2.0 that adds authentication: it gives the app an ID token that says
+who the user is. "Sign in with Google" needs OpenID Connect, because
+DineDesk wants to know who the person is, not just get access to
+something.
+
+(b) The app should use the Authorization Code flow with PKCE. PKCE
+protects against someone stealing the authorization code during the
+redirect, for example from a malicious app on the same tablet. The app
+creates a random code_verifier and sends only its hash (the
+code_challenge) at the start. To swap the code for tokens it has to send
+the original verifier, which the attacker does not have, so a stolen code
+is useless.
+
+4.
+I would require MFA for managers and administrators, because their
+accounts can see reports and manage staff, so a stolen password does the
+most damage there.
+
+The three kinds of factor are: something you know (password, PIN),
+something you have (phone, security key) and something you are
+(fingerprint, face).
+
+I would not rely on SMS alone because SMS codes can be taken through SIM
+swapping, and they can be intercepted or phished. A person can also be
+tricked into typing the code into a fake site.
+
+My recommendation is passkeys / WebAuthn (a hardware security key or the
+phone's built-in biometric) as the main option, with an authenticator app
+(TOTP) as the backup. An option is phishing-resistant when the credential
+is tied to the real website's domain, so a fake site cannot use it even if
+the person is fooled. TOTP codes and SMS codes are not phishing-resistant
+because a person can type them into a fake page.
+
+For a lost device, each manager would get one-time recovery codes when
+they set up MFA and store them safely. If those are lost too, the
+administrator verifies the person in real life and resets their MFA, and
+the old device's credentials are revoked. Administrators' own recovery
+should need a second administrator, so one person alone cannot reset it.
+
+5.
+The old API signs tokens for 30 days and the server never checks anything
+about the user after login. So the dismissed cashier's token still works
+after 10:00 on Monday. They can keep doing everything the cashier role
+can do, like reading orders and taking payments, until the token expires,
+which is 30 days after it was issued, not 30 days after they were
+dismissed. It is actually worse in the old code, because the middleware
+uses jwt.decode and never verifies the signature or the expiry, so the
+token may not expire at all.
+
+A better design: make access tokens short, for example 10 to 15 minutes.
+Give users a separate refresh token, which is a random value stored on the
+server (as a hash) and linked to the user. When the access token expires,
+the app swaps the refresh token for a new access token and the server
+rotates the refresh token. When a cashier is dismissed, the administrator
+marks the account inactive and deletes all of their refresh tokens, so
+they cannot get any new access token. Their last access token still lives
+for at most 15 minutes, and for sensitive routes like payments the server
+can also check that the user is still active in the database, which cuts
+access immediately.
+
+==========================================================================
+TASK 2: Review the Old Code
+==========================================================================
+
+The three questions used below:
+  WHO     = who are you (authentication)
+  CAN     = what can you do (authorization)
+  SECRETS = are the credentials protected
+
+--------------------------------------------------------------------------
+Flaw 1: Hardcoded, weak JWT secret
+--------------------------------------------------------------------------
+Where:     config.js, JWT_SECRET: "dinedesk2024"
+Wrong:     The signing key is written in the source code, and it is short
+           and guessable (a name plus a year).
+Fails:     SECRETS (and WHO, because the key is what proves a token is real)
+Attacker:  Anyone who can read the repository, or who guesses the key with
+           a wordlist, can sign their own tokens as any user or as an
+           admin.
+Fix:       Load the key from an environment variable, make it a long random
+           value (32+ characters), and rotate it because it is now
+           exposed.
+
+--------------------------------------------------------------------------
+Flaw 2: Hardcoded database connection string with an admin account
+--------------------------------------------------------------------------
+Where:     config.js, DATABASE_URL: "postgres://dinedesk_admin:...@db.local..."
+Wrong:     The database username and password are in the code, and the
+           account is an admin account, so the API has more database power
+           than it needs.
+Fails:     SECRETS
+Attacker:  Anyone with the code can connect to the database directly. With
+           an admin account they can read, change or drop everything.
+Fix:       Move it to an environment variable, change that password, and
+           use a limited database user (only SELECT/INSERT/UPDATE on the
+           tables the API needs).
+
+--------------------------------------------------------------------------
+Flaw 3: The whole config is printed to the logs
+--------------------------------------------------------------------------
+Where:     server.js, console.log("Starting DineDesk with config:", config)
+Wrong:     This prints the JWT secret and the database password every time
+           the server starts.
+Fails:     SECRETS
+Attacker:  Anyone who can read the logs (log tools, a support person, a
+           leaked log file) gets the secrets without touching the code.
+Fix:       Never log config values. Log only safe facts like the port and
+           the environment name.
+
+--------------------------------------------------------------------------
+Flaw 4: Password hash stored in the JWT
+--------------------------------------------------------------------------
+Where:     routes/auth.js, jwt.sign({ ..., passwordHash: user.password_hash })
+Wrong:     The payload is only Base64 encoded, so anyone can read it. The
+           token also carries the email, which is not needed.
+Fails:     SECRETS
+Attacker:  Anyone who sees a token (browser storage, a proxy, a log) can
+           decode it and run offline guessing attacks on the password hash.
+Fix:       Keep the payload minimal: sub, role, branchId, iss, aud, exp.
+           Never put hashes, passwords or extra personal data in it.
+
+--------------------------------------------------------------------------
+Flaw 5: 30-day token expiry
+--------------------------------------------------------------------------
+Where:     routes/auth.js, { expiresIn: "30d" }
+Wrong:     A token stays valid for a month, and there is no way to revoke
+           it.
+Fails:     WHO (a stolen or old token keeps proving identity)
+Attacker:  A stolen token, or a dismissed employee's token, works for up to
+           30 days.
+Fix:       Use access tokens of 15 minutes or less, plus a server-side
+           refresh token that can be revoked.
+
+--------------------------------------------------------------------------
+Flaw 6: jwt.decode used instead of jwt.verify
+--------------------------------------------------------------------------
+Where:     middleware/auth.js, const payload = jwt.decode(token)
+Wrong:     decode only reads the payload. It does not check the signature,
+           the expiry, the issuer or the audience, so any text that looks
+           like a JWT is accepted. There is also no algorithm allowlist.
+Fails:     WHO
+Attacker:  Anyone, with no account and without knowing the secret, can
+           write a token claiming to be an administrator of any branch and
+           the API will accept it. Expired tokens work too.
+Fix:       Use jwt.verify with algorithms, issuer and audience set, and
+           return 401 when it fails.
+
+--------------------------------------------------------------------------
+Flaw 7: Wrong status code for a missing or bad token
+--------------------------------------------------------------------------
+Where:     middleware/auth.js, if (!payload) return res.status(403)...
+Wrong:     A request with no valid identity should be 401, not 403. Also
+           the token is read with split(" ")[1] without checking the
+           "Bearer" scheme, so malformed headers are handled badly.
+Fails:     WHO
+Attacker:  Not a direct attack, but it hides the difference between "not
+           logged in" and "not allowed", so clients and monitoring cannot
+           handle it properly.
+Fix:       Accept only "Authorization: Bearer <token>" and return 401 for
+           every missing, malformed, expired or invalid token.
+
+--------------------------------------------------------------------------
+Flaw 8: Role taken from a request header
+--------------------------------------------------------------------------
+Where:     middleware/auth.js, role: req.headers["x-user-role"] || payload.role
+Wrong:     The client controls headers, and this header overrides the role
+           in the token.
+Fails:     CAN
+Attacker:  Any logged-in waiter adds "x-user-role: admin" to a request and
+           is treated as an administrator.
+Fix:       Build req.user only from the verified token and the server's own
+           user records. Ignore role headers completely.
+
+--------------------------------------------------------------------------
+Flaw 9: No branch check on orders (object-level authorization)
+--------------------------------------------------------------------------
+Where:     routes/orders.js, GET /orders/:id with
+           SELECT * FROM orders WHERE id = $1
+Wrong:     The route only checks that someone is logged in. It never
+           checks that the order belongs to the user's branch.
+Fails:     CAN
+Attacker:  A Piassa waiter changes the number in the URL and reads Bole's
+           orders, one id after another.
+Fix:       Fetch the order, then run one policy function like
+           canAccessOrder(user, order) before returning it. Admin is the
+           only role that can cross branches.
+
+--------------------------------------------------------------------------
+Flaw 10: Report branch taken from the query string
+--------------------------------------------------------------------------
+Where:     routes/orders.js, buildDailyReport(req.query.branchId)
+Wrong:     The branch comes from the URL, which the user controls. This is
+           the incident from the scenario.
+Fails:     CAN
+Attacker:  Any staff member (even a waiter, because there is no role
+           check) opens ?branchId=<other branch> and reads that branch's
+           daily report.
+Fix:       Use req.user.branchId from the verified identity, ignore any
+           branchId in the request, and require the reports:read
+           permission.
+
+--------------------------------------------------------------------------
+Flaw 11: Admin route has no server-side authorization
+--------------------------------------------------------------------------
+Where:     routes/admin.js, comment "only shown to administrators in the
+           React app", and DELETE /admin/users/:id uses only authenticate
+Wrong:     Hiding a page in the frontend is not security. The API itself
+           never checks the role.
+Fails:     CAN
+Attacker:  Any logged-in user, even a waiter, sends DELETE /admin/users/5
+           with a tool like curl and deletes staff accounts.
+Fix:       Check the role/permission on the server, for example
+           requireRole("admin") or requirePermission("users:manage"), and
+           deny by default.
+
+--------------------------------------------------------------------------
+Flaw 12: Payment secret key in the React app
+--------------------------------------------------------------------------
+Where:     frontend/src/payments.js, import.meta.env.VITE_PAYMENT_SECRET_KEY
+Wrong:     Every VITE_ variable is built into the JavaScript that is sent
+           to every browser. A secret key there is public.
+Fails:     SECRETS
+Attacker:  Anyone opens the browser dev tools or the bundle, copies the
+           key, and makes payments or refunds with the company's account.
+Fix:       Keep the secret key only on the server. The browser should use
+           only the provider's publishable key and a payment session
+           created by the server.
+
+--------------------------------------------------------------------------
+Flaw 13: Workflow has write-all permissions
+--------------------------------------------------------------------------
+Where:     deploy.yml, permissions: write-all
+Wrong:     The workflow's GITHUB_TOKEN can write to almost everything in
+           the repository, far more than a deploy needs.
+Fails:     SECRETS (least privilege for the credentials a job holds)
+Attacker:  If any step is compromised, it can push code, change releases or
+           edit workflows using that token.
+Fix:       Set permissions: contents: read at the top, and give extra
+           permissions only to the job that needs them.
+
+--------------------------------------------------------------------------
+Flaw 14: Deploy runs on every push and every pull request
+--------------------------------------------------------------------------
+Where:     deploy.yml, on: [push, pull_request]
+Wrong:     Deployment is triggered by any branch push and by pull
+           requests, which can come from untrusted contributors.
+Fails:     CAN (who is allowed to trigger a deploy) and SECRETS
+Attacker:  Someone opens a pull request with a changed deploy script and
+           gets it to run with the deployment credentials, or pushes a
+           half-finished branch straight to production.
+Fix:       Deploy only on pushes to main (or a manual workflow_dispatch),
+           with a protected environment and required approval. Use plain
+           tests for pull requests.
+
+--------------------------------------------------------------------------
+Flaw 15: Third-party action on a moving branch
+--------------------------------------------------------------------------
+Where:     deploy.yml, uses: some-user/ssh-deploy-action@main
+Wrong:     The action is from an unknown account and is pinned to @main, so
+           whatever the author pushes tomorrow runs in our pipeline.
+Fails:     SECRETS
+Attacker:  The author (or someone who takes over the account) pushes
+           malicious code that steals the deploy credentials.
+Fix:       Prefer official or well-known actions, review the code, and pin
+           to a full commit SHA instead of a branch.
+
+--------------------------------------------------------------------------
+Flaw 16: Hardcoded deploy token in the workflow
+--------------------------------------------------------------------------
+Where:     deploy.yml, run: ./deploy.sh --token <hardcoded value>
+Wrong:     The token is written in a file that is in the repository, and it
+           is also passed as a command argument.
+Fails:     SECRETS
+Attacker:  Anyone who can read the repo (or workflow logs) can reuse the
+           token to deploy or access the server.
+Fix:       Store it as a GitHub Actions secret, pass it through env: to
+           that one step, and rotate the exposed token.
+
+--------------------------------------------------------------------------
+Flaw 17: .env file committed to git
+--------------------------------------------------------------------------
+Where:     "git ls-files" lists a file called .env
+Wrong:     The real configuration file with real secrets is tracked, so it
+           is in the whole history of the repository.
+Fails:     SECRETS
+Attacker:  Anyone who ever cloned or viewed the repo (the key reached a
+           public repo, according to the payment provider) can read every
+           secret in it, even in older commits.
+Fix:       Remove it from tracking (git rm --cached .env), add .env to
+           .gitignore, commit only a .env.example, and rotate every secret
+           that was in the file because the history still contains it.
+
+--------------------------------------------------------------------------
+Most dangerous flaw (my choice): Flaw 6, jwt.decode instead of jwt.verify
+--------------------------------------------------------------------------
+I think this is the most dangerous because it makes authentication
+worthless. With decode, the server never checks the signature, so an
+attacker needs no account, no password and no secret key. They can write
+a token that says role admin and any branch, and the whole API trusts it.
+Every other access-control fix (roles, permissions, branch checks) depends
+on the token being real, so if this flaw is left in, those fixes protect
+nothing because the attacker can simply claim whatever identity passes
+them. The other flaws need a logged-in user or a leaked secret first, but
+this one needs nothing at all.
+
+==========================================================================
+TASK 3: (to be completed)
+==========================================================================
+
+==========================================================================
+TASK 4: (to be completed)
+==========================================================================
+
+==========================================================================
+TASK 5: (to be completed)
+==========================================================================
+◇ injected env (0) from .env
+Invalid configuration:
+  - JWT_SECRET is missing
+  - JWT_ISSUER is missing
+  - JWT_AUDIENCE is missing
+==========================================================================
+TASK 6: (to be completed)
+==========================================================================
