@@ -1,6 +1,6 @@
 ASSIGNMENT 7: Securing Access and Secrets in the DineDesk API
 Student: Etsub
-Repository: devsecops-access-control (private, instructor added as collaborator)
+Repository: devsecops-access-control (public)
 
 ==========================================================================
 TASK 1: Concepts
@@ -357,375 +357,74 @@ them. The other flaws need a logged-in user or a leaked secret first, but
 this one needs nothing at all.
 
 ==========================================================================
-TASK 3: (to be completed)
+TASK 3: Build Role- and Permission-Based Access Control   
 ==========================================================================
 
+6. My routes check a permission like orders:create instead of a list of role
+names because the route only cares about WHAT is being done, not WHO
+usually does it. The role-to-permission table lives in one file
+(permissions.js), so if the business changes what a role can do, I change
+one line there instead of hunting through every route. It also keeps the
+routes readable and makes mistakes less likely, since an unknown role
+automatically gets no permissions.
+
+To add a "kitchen" role that can read orders but not create them, I would
+add one line to permissions.js: kitchen: ["orders:read"]. The routes do not
+change: GET /api/orders already requires orders:read, so kitchen can use it,
+and POST /api/orders requires orders:create, so kitchen gets a 403. If the
+routes had listed role names, I would have had to edit every route that
+kitchen needs.
 ==========================================================================
-TASK 4: (to be completed)
+TASK 4: Branch-Level Authorization and Tests
 ==========================================================================
-4.5 
 
-  console.error
-    ◇ injected env (0) from .env
+Requirement 1
+canAccessOrder(user, order) in src/policies/orderPolicy.js is the only place
+that decides who may see an order. Admins may see any order, everyone else
+only orders from their own branch, and a user without a branch gets nothing.
+GET /api/orders filters its list with it and GET /api/orders/:id calls it
+before returning the order.
 
-    > 1 | require("dotenv").config(); // does not override variables that are already set
-        |                   ^
-      2 |
-      3 | const MIN_SECRET_LENGTH = 32;
-      4 |
+Requirement 2
+GET /api/reports/branch never reads req.query. It builds the report from
+req.user.branchId, which comes from the verified token and our own user
+records. The test "Piassa manager with ?branchId=bole still gets only
+Piassa data" and the two PowerShell calls above show both URLs return the
+same Piassa report.
 
-      at W (node_modules/dotenv/dist/index.cjs:6:151)
-      at Object.M [as configDotenv] (node_modules/dotenv/dist/index.cjs:6:1119)
-      at Object.Y [as config] (node_modules/dotenv/dist/index.cjs:6:1226)
-      at Object.config (src/config/index.js:1:19)
-      at Object.require (src/routes/auth.js:4:16)
-      at Object.require (src/app.js:3:20)
-      at Object.require (tests/dinedesk.test.js:3:13)
+Requirement 3
+I chose 404 for another branch's order. With 403 the API would confirm
+that the order exists, so a curious waiter could try ids and learn which
+orders and how many exist in the other branch. With 404 a missing order and
+another branch's order look exactly the same, so nothing leaks. My test
+checks that the two responses are identical, which enforces this choice.
 
-  console.error
-    Unexpected error: canAccessOrder is not a function
+Requirement 4
+Test Suites: 1 passed, 1 total
+Tests:       19 passed, 19 total
+Snapshots:   0 total
+Time:        4.278 s
+Ran all test suites.
 
-      29 |     return res.status(400).json({ error: "Invalid JSON" });
-      30 |   }
-    > 31 |   console.error("Unexpected error:", err && err.message);
-         |           ^
-      32 |   res.status(500).json({ error: "Internalserver error" });
-      33 | });
-      34 |
-
-      at error (src/app.js:31:11)
-      at Layer.handleError (node_modules/router/lib/layer.js:116:17)
-      at trimPrefix (node_modules/router/index.js:340:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at Layer.handleError (node_modules/router/lib/layer.js:111:12)
-      at trimPrefix (node_modules/router/index.js:340:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at node_modules/router/index.js:688:15
-      at next (node_modules/router/index.js:276:14)
-      at next (node_modules/router/lib/route.js:132:14)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:165:5)
-      at next (node_modules/router/lib/route.js:157:13)
-      at next (src/middleware/requirePermission.js:9:5)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at next (node_modules/router/lib/route.js:157:13)
-      at Route.dispatch (node_modules/router/lib/route.js:117:3)
-      at handle (node_modules/router/index.js:435:11)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at node_modules/router/index.js:295:15
-      at param (node_modules/router/index.js:600:14)
-      at param (node_modules/router/index.js:610:14)
-      at processParams (node_modules/router/index.js:664:3)
-      at next (node_modules/router/index.js:291:5)
-      at next (src/middleware/authenticate.js:41:3)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at trimPrefix (node_modules/router/index.js:342:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at router.handle (node_modules/router/index.js:186:3)
-      at router (node_modules/router/index.js:60:12)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at trimPrefix (node_modules/router/index.js:342:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at read (node_modules/body-parser/lib/read.js:59:5)
-      at jsonParser (node_modules/body-parser/lib/types/json.js:60:5)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at trimPrefix (node_modules/router/index.js:342:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at router.handle (node_modules/router/index.js:186:3)
-      at app.handle (node_modules/express/lib/application.js:177:15)
-      at Server.app (node_modules/express/lib/express.js:38:9)
-
-  console.error
-    Unexpected error: canAccessOrder is not a function
-
-      29 |     return res.status(400).json({ error: "Invalid JSON" });
-      30 |   }
-    > 31 |   console.error("Unexpected error:", err && err.message);
-         |           ^
-      32 |   res.status(500).json({ error: "Internalserver error" });
-      33 | });
-      34 |
-
-      at error (src/app.js:31:11)
-      at Layer.handleError (node_modules/router/lib/layer.js:116:17)
-      at trimPrefix (node_modules/router/index.js:340:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at Layer.handleError (node_modules/router/lib/layer.js:111:12)
-      at trimPrefix (node_modules/router/index.js:340:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at node_modules/router/index.js:688:15
-      at next (node_modules/router/index.js:276:14)
-      at next (node_modules/router/lib/route.js:132:14)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:165:5)
-      at next (node_modules/router/lib/route.js:157:13)
-      at next (src/middleware/requirePermission.js:9:5)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at next (node_modules/router/lib/route.js:157:13)
-      at Route.dispatch (node_modules/router/lib/route.js:117:3)
-      at handle (node_modules/router/index.js:435:11)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at node_modules/router/index.js:295:15
-      at param (node_modules/router/index.js:600:14)
-      at param (node_modules/router/index.js:610:14)
-      at processParams (node_modules/router/index.js:664:3)
-      at next (node_modules/router/index.js:291:5)
-      at next (src/middleware/authenticate.js:41:3)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at trimPrefix (node_modules/router/index.js:342:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at router.handle (node_modules/router/index.js:186:3)
-      at router (node_modules/router/index.js:60:12)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at trimPrefix (node_modules/router/index.js:342:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at read (node_modules/body-parser/lib/read.js:59:5)
-      at jsonParser (node_modules/body-parser/lib/types/json.js:60:5)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at trimPrefix (node_modules/router/index.js:342:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at router.handle (node_modules/router/index.js:186:3)
-      at app.handle (node_modules/express/lib/application.js:177:15)
-      at Server.app (node_modules/express/lib/express.js:38:9)
-
-  console.error
-    Unexpected error: canAccessOrder is not a function
-
-      29 |     return res.status(400).json({ error: "Invalid JSON" });
-      30 |   }
-    > 31 |   console.error("Unexpected error:", err && err.message);
-         |           ^
-      32 |   res.status(500).json({ error: "Internalserver error" });
-      33 | });
-      34 |
-
-      at error (src/app.js:31:11)
-      at Layer.handleError (node_modules/router/lib/layer.js:116:17)
-      at trimPrefix (node_modules/router/index.js:340:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at Layer.handleError (node_modules/router/lib/layer.js:111:12)
-      at trimPrefix (node_modules/router/index.js:340:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at node_modules/router/index.js:688:15
-      at next (node_modules/router/index.js:276:14)
-      at next (node_modules/router/lib/route.js:132:14)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:165:5)
-      at next (node_modules/router/lib/route.js:157:13)
-      at Route.dispatch (node_modules/router/lib/route.js:117:3)
-      at handle (node_modules/router/index.js:435:11)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at node_modules/router/index.js:295:15
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at next (src/middleware/authenticate.js:41:3)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at trimPrefix (node_modules/router/index.js:342:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at router.handle (node_modules/router/index.js:186:3)
-      at router (node_modules/router/index.js:60:12)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at trimPrefix (node_modules/router/index.js:342:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at read (node_modules/body-parser/lib/read.js:59:5)
-      at jsonParser (node_modules/body-parser/lib/types/json.js:60:5)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at trimPrefix (node_modules/router/index.js:342:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at router.handle (node_modules/router/index.js:186:3)
-      at app.handle (node_modules/express/lib/application.js:177:15)
-      at Server.app (node_modules/express/lib/express.js:38:9)
-
-  console.error
-    Unexpected error: canAccessOrder is not a function
-
-      29 |     return res.status(400).json({ error: "Invalid JSON" });
-      30 |   }
-    > 31 |   console.error("Unexpected error:", err && err.message);
-         |           ^
-      32 |   res.status(500).json({ error: "Internalserver error" });
-      33 | });
-      34 |
-
-      at error (src/app.js:31:11)
-      at Layer.handleError (node_modules/router/lib/layer.js:116:17)
-      at trimPrefix (node_modules/router/index.js:340:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at Layer.handleError (node_modules/router/lib/layer.js:111:12)
-      at trimPrefix (node_modules/router/index.js:340:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at node_modules/router/index.js:688:15
-      at next (node_modules/router/index.js:276:14)
-      at next (node_modules/router/lib/route.js:132:14)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:165:5)
-      at next (node_modules/router/lib/route.js:157:13)
-      at next (src/middleware/requirePermission.js:9:5)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at next (node_modules/router/lib/route.js:157:13)
-      at Route.dispatch (node_modules/router/lib/route.js:117:3)
-      at handle (node_modules/router/index.js:435:11)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at node_modules/router/index.js:295:15
-      at param (node_modules/router/index.js:600:14)
-      at param (node_modules/router/index.js:610:14)
-      at processParams (node_modules/router/index.js:664:3)
-      at next (node_modules/router/index.js:291:5)
-      at next (src/middleware/authenticate.js:41:3)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at trimPrefix (node_modules/router/index.js:342:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at router.handle (node_modules/router/index.js:186:3)
-      at router (node_modules/router/index.js:60:12)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at trimPrefix (node_modules/router/index.js:342:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at read (node_modules/body-parser/lib/read.js:59:5)
-      at jsonParser (node_modules/body-parser/lib/types/json.js:60:5)
-      at Layer.handleRequest (node_modules/router/lib/layer.js:152:17)
-      at trimPrefix (node_modules/router/index.js:342:13)
-      at node_modules/router/index.js:297:9
-      at processParams (node_modules/router/index.js:582:12)
-      at next (node_modules/router/index.js:291:5)
-      at router.handle (node_modules/router/index.js:186:3)
-      at app.handle (node_modules/express/lib/application.js:177:15)
-      at Server.app (node_modules/express/lib/express.js:38:9)
-
- FAIL  tests/dinedesk.test.js
-  authentication
-    √ no token -> 401 (73 ms)
-    √ malformed Authorization header -> 401 (9 ms)
-    √ token signed with the wrong key -> 401 (15 ms)
-    √ expired token -> 401 (12 ms)
-    √ token with alg "none" -> 401 (5 ms)
-    √ wrong email and wrong password give the same generic error (282 ms)
-    √ login ignores a role sent in the body (109 ms)
-  roles and permissions
-    √ waiter calling GET /api/admin/users -> 403 (142 ms)
-    √ administrator calling GET /api/admin/users -> 200 with no password hashes (119 ms)
-    √ waiter creating an order -> 201 (113 ms)
-    √ cashier creating an order -> 403 (135 ms)
-    √ a branchId in the order body is ignored (133 ms)
-    √ an unknown role has no permissions (1 ms)
-  branch-level authorization
-    × Bole manager reading a Bole order -> 200 (201 ms)
-    × Bole manager reading a Piassa order -> 404, same as a missing order (128 ms)
-    × the order list only contains the user's own branch (119 ms)
-    × administrator can read an order from any branch (127 ms)
-    √ waiter calling GET /api/reports/branch -> 403 (103 ms)
-    √ Piassa manager with ?branchId=bole still gets only Piassa data (102 ms)
-
-  ● branch-level authorization › Bole manager reading a Bole order -> 200
-
-    expect(received).toBe(expected) // Object.is equality
-
-    Expected: 200
-    Received: 500
-
-      148 |     const token = await tokenFor("manager.bole@dinedesk.test");
-      149 |     const res = await request(app).get(`/api/orders/${BOLE_ORDER}`).set(auth(token));
-    > 150 |     expect(res.status).toBe(200);
-          |                        ^
-      151 |     expect(res.body.branchId).toBe("bole");
-      152 |   });
-      153 |
-
-      at Object.toBe (tests/dinedesk.test.js:150:24)
-
-  ● branch-level authorization › Bole manager reading a Piassa order -> 404, same as a missing order
-
-    expect(received).toBe(expected) // Object.is equality
-
-    Expected: 404
-    Received: 500
-
-      157 |     const missing = await request(app).get("/api/orders/99999").set(auth(token));
-      158 |
-    > 159 |     expect(otherBranch.status).toBe(404);
-          |                                ^
-      160 |     expect(otherBranch.body).toEqual(missing.body);
-      161 |     expect(JSON.stringify(otherBranch.body)).not.toMatch(/piassa|shiro|P2/i);
-      162 |   });
-
-      at Object.toBe (tests/dinedesk.test.js:159:32)
-
-  ● branch-level authorization › the order list onlycontains the user's own branch
-
-    expect(received).toBe(expected) // Object.is equality
-
-    Expected: 200
-    Received: 500
-
-      165 |     const token = await tokenFor("waiter.bole@dinedesk.test");
-      166 |     const res = await request(app).get("/api/orders").set(auth(token));
-    > 167 |     expect(res.status).toBe(200);
-          |                        ^
-      168 |     expect(res.body.length).toBeGreaterThan(0);
-      169 |     expect(res.body.every((o) => o.branchId === "bole")).toBe(true);
-      170 |   });
-
-      at Object.toBe (tests/dinedesk.test.js:167:24)
-
-  ● branch-level authorization › administrator can read an order from any branch
-
-    expect(received).toBe(expected) // Object.is equality
-
-    Expected: 200
-    Received: 500
-
-      173 |     const token = await tokenFor("admin@dinedesk.test");
-      174 |     const res = await request(app).get(`/api/orders/${PIASSA_ORDER}`).set(auth(token));
-    > 175 |     expect(res.status).toBe(200);
-          |                        ^
-      176 |   });
-      177 |
-      178 |   test("waiter calling GET /api/reports/branch -> 403", async () => {
-
-      at Object.toBe (tests/dinedesk.test.js:175:24)
-
+Requirement 5
 Test Suites: 1 failed, 1 total
 Tests:       4 failed, 15 passed, 19 total
 Snapshots:   0 total
 Time:        4.13 s
 Ran all test suites.
+
+Requirement 6
+The tests get their signing key from tests/setup-env.js, which Jest loads
+before every test file and which sets JWT_SECRET to a long fake string
+written only for testing. The workflow therefore needs no repository secret
+at all, so it works on pull requests and nothing real can leak.
+Green run: https://github.com/Floridnova/devsecops-access-control/actions/runs/43481968762
+
 ==========================================================================
 TASK 5: (to be completed)
 ==========================================================================
-◇ injected env (0) from .env
+1.
+ ◇ injected env (0) from .env
 Invalid configuration:
   - JWT_SECRET is missing
   - JWT_ISSUER is missing
