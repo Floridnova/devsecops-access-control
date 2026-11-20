@@ -1,0 +1,465 @@
+ASSIGNMENT 8: Watching DineDesk, and Investigating the TicketHub Key Leak
+Student: Etsub
+Pull request: (paste the PR link here: module8-monitoring -> main)
+Starting point: (fill in: "my Assignment Seven API" or "the Module 8 worked example")
+
+All values in this file are invented. Log lines pasted below were searched
+for secrets before pasting (see Task 3, requirement 6).
+
+==========================================================================
+TASK 1: Concepts
+==========================================================================
+
+1.
+Logs are records of individual events, each with details such as who did
+what, when and from where. Metrics are numbers measured over time, such as
+counts and rates, that show trends but not the details of one request.
+
+Log example (TicketHub): the line at 03:20:02 with event authorization_denied,
+keyId kp-0457, ip 198.51.100.23, POST /partner/v1/refunds, required
+refunds:create. It tells us exactly what one request tried to do.
+
+Metric example (TicketHub): the number of Partner API requests per minute for
+kp-0457 (partner_requests_total by keyId). A rate above 10 per minute is what
+triggered PartnerKeyRequestSpike, and the count of 403 responses is what
+triggered PartnerForbiddenRequests.
+
+2.
+Structured (JSON) logs have named fields, so a tool can filter and count by
+field (event, ip, keyId, statusCode) without guessing how a sentence was
+written. A free-text message changes wording from one place in the code to
+another and hides the values inside a sentence.
+Hard to search or count: "bad key kp-0457 tried again from 198.51.100.23".
+To count failed key attempts per IP you would need a fragile text pattern,
+and a different developer might write "invalid api key, ip=..." elsewhere.
+As JSON, {"event":"authentication_failed","reason":"invalid_key",
+"ip":"198.51.100.23"} can be counted by event and grouped by ip directly.
+
+3.
+(a) info. A successful request is normal behaviour; it is useful as an
+    audit record but needs no attention.
+(b) warn. The system worked correctly by refusing the request, but a denied
+    action may be a sign of probing, so it must be visible and countable.
+(c) error. The service failed to do what it should and a request failed, so
+    someone must look at it (fatal only if the whole service had to stop).
+(d) fatal. The service cannot run safely without the secret, so it logs the
+    name of the missing setting (never a value) and exits.
+(e) info. It is an expected, successful administrative action; its
+    importance comes from being an audit event with actor and target, not
+    from a high level. (The TicketHub api_key_revoked line is also info.)
+
+4.
+Five things that must never be logged:
+  1. Passwords (including the password typed in a failed login).
+  2. API keys and access tokens, including JWTs and session cookies.
+  3. Authorization, Cookie and X-Api-Key headers.
+  4. Signing keys, database connection strings and other configuration
+     secrets.
+  5. Full card numbers, and bulk personal data such as customers' names,
+     emails and phone numbers.
+
+If the Partner API had logged the full key on every request, every log line
+for every partner would be a working credential. Anyone able to read the logs
+(engineers, the log platform, backups, a log vendor) could pretend to be any
+of the ~40 partners, so one leaked key could become 40, and the attacker's
+119 requests would have printed the stolen key 119 more times into storage
+that we cannot easily clean. The investigators could also not have safely
+shared or pasted the log extract.
+
+5.
+Prometheus collects metrics by scraping /metrics endpoints, stores them as
+time series and evaluates alert rules. Grafana does not store metrics; it
+queries Prometheus (and other sources) and draws dashboards and panels.
+
+Why /metrics must not be on the public API port: it is unauthenticated and
+shows internal information (routes, traffic volumes, counts of security
+events, sometimes versions), which helps an attacker plan and lets anyone
+watch our defences. It should be on a separate port bound to 127.0.0.1 or an
+internal network that only Prometheus can reach.
+
+Why keyId is acceptable but customerEmail is not: every different label value
+creates a new time series. About 40 keyIds is a small, bounded number, so
+memory stays small. Customer emails are unbounded (a new series per customer,
+potentially thousands), which can overload Prometheus, and they would also
+copy personal data into a metrics system with broad access and long retention.
+
+6.
+An alert is actionable when it tells the right person, in a way they will
+actually see, about a specific condition that needs a human decision now, with
+a clear severity and a known first response (a runbook), and with few false
+alarms.
+
+PartnerKeyRequestSpike was a warning routed to the integrations@ mailbox, and
+the status shows "never opened". It fired at 03:15:00, while the download was
+still running (it finished at 03:19:59), so it was the one alert that could
+have stopped the theft in progress, but it went to a place nobody was
+watching. The severity was also too low: a spike on a key with orders:read,
+which returns customers' personal data, should have paged on-call at once.
+The critical alert at 03:21:00 came 6 minutes later, after all the data was
+already gone.
+
+==========================================================================
+TASK 2: Review TicketHub's Old Logging Code
+==========================================================================
+
+Problem 1: request logger prints ALL headers
+  Where:  console.log(... JSON.stringify(req.headers) ...)
+  Wrong:  Headers include X-Api-Key, Authorization and Cookie.
+  Harm:   Every request writes a working partner key or session into the
+          logs; anyone with log access can use them.
+  Fix:    Never log headers wholesale. Log only chosen safe fields and
+          redact authorization, cookie and x-api-key.
+
+Problem 2: request logger prints the whole request body
+  Where:  JSON.stringify(req.body)
+  Wrong:  Bodies contain passwords (/login) and customers' personal data.
+  Harm:   Passwords and personal data stored in plain text in logs.
+  Fix:    Do not log bodies. If a field is needed, allowlist it by name.
+
+Problem 3: failed login logs the typed email AND password
+  Where:  "LOGIN FAILED: " + req.body.email + " / " + req.body.password
+  Wrong:  A mistyped password is often another real password or a near
+          miss of the real one; the email is personal data.
+  Harm:   Anyone reading logs can take over accounts; breaks privacy.
+  Fix:    Log event login_failed with userId only if the account exists,
+          the reason, requestId and ip. Never the typed email or password.
+
+Problem 4: partner key logged on failure
+  Where:  console.log("bad key " + key)
+  Wrong:  The submitted key is written to the log; a typo is often one
+          character away from a real key.
+  Harm:   Log readers can recover real keys; same leak as problem 1.
+  Fix:    Log event authentication_failed with reason invalid_key, ip and
+          requestId, and never the key.
+
+Problem 5: stack trace and error message sent to the client
+  Where:  res.status(500).json({ error: err.message, stack: err.stack })
+  Wrong:  Exposes internal paths, library versions and query details.
+  Harm:   Helps attackers map the system; may leak values from the error.
+  Fix:    Return a generic message and the requestId; log the error with
+          its stack on the server only.
+
+Problem 6: the error handler does not log the error at all
+  Where:  app.use((err, req, res, next) => { res.status(500)... })
+  Wrong:  The server writes no server_error event.
+  Harm:   Failures and attacks that cause errors leave no trace on our side.
+  Fix:    Log a server_error event (level error) with requestId before
+          responding.
+
+Problem 7: customerEmail used as a metric label
+  Where:  labelNames: ["keyId","customerEmail","url"]
+  Wrong:  Unbounded values create a new time series for each customer.
+  Harm:   Memory blow-up and a denial of the monitoring system; personal
+          data copied into metrics.
+  Fix:    Remove customerEmail. Use only bounded labels.
+
+Problem 8: raw url used as a metric label
+  Where:  the "url" label
+  Wrong:  /orders/1, /orders/2, ... and query strings each become a label.
+  Harm:   Cardinality explosion; ids or tokens in a query string end up in
+          metrics.
+  Fix:    Use the route pattern (/orders/:id) and the status code.
+
+Problem 9: free-text logs with a local-time date and no levels
+  Where:  console.log(`${new Date()} ${req.method} ...`), console.log and
+          console.error used for everything
+  Wrong:  Not JSON, not ISO UTC, no consistent level; a failed login is
+          console.error, a bad key is console.log.
+  Harm:   Hard to search, count, alert on or correlate across time zones.
+  Fix:    A structured logger (JSON, ISO 8601 UTC, level, service, event).
+
+Problem 10: no request id
+  Where:  the whole logging code
+  Wrong:  Nothing links the request line to the auth failure or the error.
+  Harm:   Support cannot match a user's 500 response to the log line.
+  Fix:    Generate or validate an id, return it as X-Request-Id and add it
+          to every log line.
+
+Problem 11: auth and success paths do not log who, from where and how much
+  Where:  partnerAuth 403 branch (nothing logged), no success event
+  Wrong:  The 403 returns silently with no keyId, ip or required scope, and
+          successful requests only have raw headers and a body.
+  Harm:   Denied attacks are invisible and nobody can tell which key
+          downloaded how many records from which IP.
+  Fix:    Log partner_request (keyId, partner, ip, path, status, records)
+          and authorization_denied (keyId, ip, required scope).
+
+Most helpful problem to fix for the investigation (the one that would have
+made the TicketHub incident hardest to investigate): Problem 11.
+Everything we know came from the fields keyId, ip, page, statusCode and
+records on each partner_request line: the second IP, the 119 pages, the
+5,937 records, and the refused refund and customer requests. With only raw
+headers and a silent 403, we could not tell which key was used, from where,
+how much was downloaded or what was refused, so we would have had to assume
+the worst for all customers. (Problem 1 would be worse for secrecy, but
+problem 11 is the one that blocks the investigation itself.)
+
+==========================================================================
+TASK 3: Security Logging for DineDesk
+==========================================================================
+
+(to be completed after the code is built on branch module8-monitoring)
+
+==========================================================================
+TASK 4: Metrics and Alerting
+==========================================================================
+
+(to be completed after the code is built on branch module8-monitoring)
+
+==========================================================================
+TASK 5: Investigate the Incident
+==========================================================================
+
+1. Timeline (UTC, 10 to 11 October 2026)
+
+ #   Time                 Event and evidence
+ 1   10 Oct 15:02         Partner's .env with key kp-0457 committed to the
+                          public repository promoco-dev/ticket-sync. The key
+                          is exposed. (Evidence: "found later" note.)
+ 2   11 Oct 02:05:44-45   Normal hourly sync from 192.0.2.80: orders page 1
+                          (50 records), page 2 (12). Baseline. (Log lines.)
+ 3   03:05:41             Normal hourly sync, orders page 1, 8 records, from
+                          192.0.2.80. Last legitimate request before the
+                          incident. (Log line.)
+ 4   03:12:07             First malicious request: GET /partner/v1/events
+                          from 198.51.100.23, 34 records. (Log line.)
+ 5   03:12:31             Bulk download of orders starts: page 1, 50
+                          records, from 198.51.100.23.
+ 6   03:15:00             Alert PartnerKeyRequestSpike (warning) routed to
+                          the integrations@ mailbox; never opened.
+                          (Alert history.)
+ 7   03:19:59             Page 119 (37 records) fetched; download complete.
+                          Pages 1-119 in 7 min 28 s. (Log line.)
+ 8   03:20:02 and 03:20:05  POST /partner/v1/refunds twice, both 403,
+                          required refunds:create. (Log lines.)
+ 9   03:20:41 and 03:20:44  GET /partner/v1/customers twice, both 403,
+                          required customers:read. (Log lines.)
+10   03:21:00             Alert PartnerForbiddenRequests (critical) pages
+                          the on-call engineer. (Alert history.)
+11   03:30:05, 03:40:07, 03:50:06   Attacker re-fetches orders page 119 (37
+                          records) every 10 minutes. (Log lines.)
+12   03:41:12             On-call engineer acknowledges the page.
+                          (Alert history.)
+13   03:52:14             Key kp-0457 revoked (api_key_revoked, audit,
+                          actor an operations engineer, outcome success).
+                          Containment. (Log line.)
+14   04:00:08             Attacker request from 198.51.100.23 refused 401,
+                          reason key_revoked. Confirms containment.
+15   04:05:39             PromoCo's integration (192.0.2.80) refused 401,
+                          key_revoked: the legitimate sync is now broken.
+16   04:12                First phone call from TicketHub to the partner.
+                          ("Found later" note.)
+17   04:30:02             New key kp-0461 issued: events:read + orders:read,
+                          allowed IP 192.0.2.80. (Audit log line.)
+18   04:45:10             Partner's integration works again: GET orders page
+                          1 with kp-0461, 200, 3 records, from 192.0.2.80.
+19   05:10                On-call engineer finds the key in the public
+                          repository. ("Found later" note.)
+
+2. Identification
+The first sign was the PartnerKeyRequestSpike alert at 03:15:00 (more than 10
+requests per minute for kp-0457). The logs show it began at 03:12:07.
+Three features that separate the attacker from PromoCo's normal traffic:
+  1. Source IP: 198.51.100.23, while PromoCo's integration only runs from
+     192.0.2.80.
+  2. Volume and pattern: pages 1 to 119 of orders in 7 min 28 s (about 16
+     requests a minute), a full historical download, while PromoCo fetches
+     only orders since its last sync: one or two pages, once an hour at about
+     hh:05 (02:05, 03:05).
+  3. Behaviour outside the integration's use: POSTs to /refunds and GETs on
+     /customers (all refused 403), which PromoCo's integration never calls.
+     Also automated re-polling of page 119 every 10 minutes.
+
+3. Impact
+Records downloaded: pages 1 to 118 each had 50 records and page 119 had 37.
+  118 x 50 = 5,900
+  5,900 + 37 = 5,937 order records.
+(The 34 events records at 03:12:07 are public event information.)
+
+Personal data exposed: for each order, the order id, event, number of
+tickets, and the customer's full name, email address and phone number. The
+people affected are TicketHub's customers who bought tickets (up to 5,937
+orders; the number of different people may be lower if someone ordered more
+than once).
+
+The polls at 03:30, 03:40 and 03:50: they did not expose additional
+customers as far as the logs show. Each returned page 119 with the same 37
+records. If new orders had been created, the last page would have grown above
+37. So the attacker re-downloaded the same 37 customers' data three more
+times and was waiting for new orders; if the key had stayed valid, new
+customers would have been exposed. Caveat: the logs only record counts, so
+this should be confirmed by comparing the order ids in those responses.
+
+Failed attempts: two POST requests to /partner/v1/refunds from 198.51.100.23
+(03:20:02 and 03:20:05) and two GET requests to /partner/v1/customers
+(03:20:41 and 03:20:44), all refused with 403 because the key lacks
+refunds:create and customers:read. The control that stopped them is
+scope-based (permission-based) authorization with least privilege and deny
+by default, taught in Module 7. (Check this module number against my notes.)
+
+4. Measure
+  Exposure to first malicious use:
+    10 Oct 15:02:00 -> 11 Oct 03:12:07
+    = 12 h 00 min (to 03:02) + 10 min 07 s = 12 h 10 min 07 s
+  First malicious request to first alert:
+    03:12:07 -> 03:15:00 = 2 min 53 s
+    (to the critical alert at 03:21:00 it is 8 min 53 s)
+  First malicious request to acknowledgment:
+    03:12:07 -> 03:41:12 = 29 min 05 s
+    (from the page at 03:21:00 to acknowledgment it is 20 min 12 s)
+  First malicious request to containment:
+    03:12:07 -> 03:52:14 = 40 min 07 s
+    (from the page at 03:21:00 it is 31 min 14 s; from acknowledgment to
+    revoking it is 11 min 02 s)
+  Total time the key was exposed and valid:
+    10 Oct 15:02:00 -> 11 Oct 03:52:14 = 12 h 50 min 14 s
+  Legitimate integration broken:
+    The key stopped working at 03:52:14 and the integration worked again at
+    04:45:10 = 52 min 56 s. The first failed sync we can see was at 04:05:39,
+    which is 39 min 31 s before it worked again.
+
+5. Critique of the response
+Went well:
+  1. Scope limits worked and the logs were good. The key only had
+     events:read and orders:read, so the refund and customer requests were
+     refused (4 lines with 403), and each log line has keyId, ip, page and
+     records, so we can state exactly what was taken (5,937 records).
+  2. The recovery was safe and recorded. Revoking the key and issuing the
+     new key kp-0461 were audit events (actor, scopes), and the new key was
+     limited to the allowed IP 192.0.2.80 and the same two scopes; the 04:00
+     and 04:05 lines show the revoked key was refused.
+Went badly:
+  1. Alert routing. PartnerKeyRequestSpike at 03:15:00 was a warning sent to
+     a mailbox and "never opened". The download was still running until
+     03:19:59, so a page at 03:15 could have cut it short.
+  2. Slow response. After the critical page at 03:21:00 the acknowledgment
+     took 20 min 12 s (03:41:12) and revoking another 11 min 02 s (03:52:14),
+     and the attacker kept polling at 03:30, 03:40 and 03:50 meanwhile.
+  3. Slow communication and weak key design. Nobody phoned the partner until
+     04:12 (20 min after revocation and 6 min after its sync failed at
+     04:05:39), the leak was only found on GitHub at 05:10, and the key
+     worked from any IP for 12 h 50 min, with no limit on how many pages it
+     could download in 7 minutes.
+
+6. The first 15 minutes (paged at 03:21)
+  03:21-03:23  Acknowledge the page. Open the alert and filter the logs for
+               keyId kp-0457 for the last 2 hours. Check: IP is
+               198.51.100.23, not 192.0.2.80; pages 1-119 downloaded; refund
+               and customer requests refused.
+  03:23-03:26  Contain: revoke key kp-0457 now (this audit-logs my action).
+               I accept that the partner's integration will stop working; the
+               harm of continuing to leak customers' data is bigger. Also
+               block 198.51.100.23 at the edge as a second layer, not as a
+               replacement for the revocation.
+  03:26-03:30  Preserve evidence before anything changes: export all log
+               lines for kp-0457 (10-11 Oct), the alert history and the
+               revocation audit event to a read-only location; save
+               screenshots of the dashboards; write my actions and times in
+               UTC in an incident note. Do not delete or edit anything.
+  03:30-03:33  Inform: the incident lead / security lead and my manager, and
+               the data protection officer and legal contact, with the facts
+               so far.
+  03:33-03:36  Phone the partner's emergency contact: their key for the
+               account is exposed, ask them to take the repository down and
+               to check how it was committed; agree to issue a new key.
+  03:36     Check other keys and endpoints: any other keys from the same IP,
+               any other partner requests with the same pattern.
+Who must be told about the personal data: the data protection officer or
+privacy owner, legal counsel and senior management; they decide whether
+regulators and affected customers must be notified and when. That decision is
+not mine alone because it carries legal duties and deadlines (some laws set
+them in hours), affects the company's reputation and customers, and needs
+people with the authority and the facts about what the law requires. My job
+is to contain, preserve evidence and give them accurate facts quickly.
+
+==========================================================================
+TASK 6: Post-Incident Review (blameless)
+==========================================================================
+
+Incident: Partner API key leak, 10-11 October 2026
+
+1. Summary
+A partner's API key was committed to a public repository and was used from an
+unknown IP address to download 5,937 order records, which contain customers'
+names, emails and phone numbers. The key was revoked after 40 minutes and a
+new, IP-restricted key was issued, restoring the partner's integration 52
+minutes after revocation.
+
+2. Timeline
+See the Task 5 timeline. Key times (UTC): key exposed 10 Oct 15:02; first
+malicious request 11 Oct 03:12:07; first alert 03:15:00 (not seen); critical
+page 03:21:00; acknowledged 03:41:12; revoked 03:52:14; partner phoned 04:12;
+new key issued 04:30:02; integration restored 04:45:10.
+
+3. Root causes
+  1. A leaked key was enough on its own. The key worked from any IP address
+     and had no expiry, so whoever found it could use it exactly like the
+     partner (no second factor, no IP binding).
+  2. Nothing limited bulk reading of personal data. A key with orders:read
+     could download 119 pages (5,937 customer records) in 7 min 28 s, with no
+     rate limit, daily record cap or minimisation of the data returned.
+  3. Detection was routed and tuned wrongly. The early spike alert was a
+     warning sent to an unwatched mailbox, and the critical alert fired only
+     on 403s, after the data was already downloaded.
+  4. Response depended on individuals. There was no runbook that gave the
+     on-call engineer clear authority to revoke at once and no checked
+     emergency contact for partners, so acknowledgment took 20 min, revoking
+     another 11 min, and the partner was called 6 min after their sync failed.
+  5. Nobody would notice a leaked key. TicketHub did not scan public
+     repositories for its keys, so the key sat in a public repository for
+     12 h 10 min before first use and was only found at 05:10.
+
+4. Impact
+  Data: 5,937 order records (order id, event, tickets, customer name, email,
+  phone); events data (public) also read. No refunds or customer-list access
+  succeeded (4 requests refused with 403).
+  People: TicketHub customers in those orders (up to 5,937 people).
+  Partner: integration unusable for 52 min 56 s; key replaced.
+  Duration: key exposed and valid for 12 h 50 min 14 s; attacker active
+  for 40 min 07 s (03:12:07 to 03:52:14).
+
+5. What went well / badly
+  Well: scopes blocked the refund and customer requests; logs with keyId, ip
+  and records let us measure the exact impact; revocation and re-issue were
+  recorded as audit events; the new key was restricted to the partner's IP.
+  Badly: the first alert was never seen; 31 min passed between the critical
+  page and revocation while the attacker kept polling; the partner was phoned
+  late and the leak found only at 05:10; the key could be used from anywhere.
+
+6. Actions
+
+  #  Action (specific and checkable)                  Owner            Due         Module
+  1  Change PartnerKeyRequestSpike: for keys with     Platform/SRE     2026-10-18  8 (alerting)
+     orders:read, severity critical, route to the     lead
+     on-call pager, and add the runbook link. Check:
+     alert rule file shows route and severity.
+  2  New alert PartnerBulkRead: fire when one key     Platform/SRE     2026-10-18  8 (alerting)
+     reads more than 30 order pages in 10 minutes,    lead
+     and a second alert when a key is used from an
+     IP not in its allowlist. Check: rule tests pass
+     against this incident's log pattern.
+  3  Change how keys are issued: every new key must  Partner API       2026-10-31  7 (least
+     have an IP allowlist, only the scopes the        product owner                privilege,
+     partner needs, and a 90-day expiry; migrate                                   secrets)
+     all ~40 existing keys. Check: no key in the
+     keys table without an allowlist and expiry.
+  4  Limit bulk reads: rate limit per key and a      API engineering  2026-11-01  7 (least
+     daily cap on order records; return masked       lead                         privilege)
+     phone and email unless a customers:read scope
+     is granted. Check: test shows a key stopped
+     after the cap.
+  5  Join GitHub secret scanning for the kp- key     Security         2026-10-25  6 (secret
+     format and run a daily search for our keys in    engineer                     scanning)
+     public repositories. Check: test key pushed to
+     a test repo is reported within one day.
+  6  Write and test the leaked-partner-key runbook:  Incident-        2026-10-31  8 (incident
+     on-call may revoke without approval, partner    response lead                response)
+     24/7 emergency contacts verified quarterly,
+     acknowledgment target 5 min. Check: tabletop
+     exercise held and recorded.
+  7  Complete the breach assessment for the 5,937    Data protection  2026-10-14  8 (incident
+     records and record the decision on notifying    officer                      response)
+     regulators and customers. Check: written
+     decision filed.
+
+Module numbers are as in my course notes (confirm before submitting).

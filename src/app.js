@@ -1,5 +1,9 @@
 const express = require("express");
 
+const requestId = require("./middleware/requestId");
+const requestLogger = require("./middleware/requestLogger");
+const errorHandler = require("./middleware/errorHandler");
+
 const authRoutes = require("./routes/auth");
 const orderRoutes = require("./routes/orders");
 const paymentRoutes = require("./routes/payments");
@@ -7,6 +11,9 @@ const reportRoutes = require("./routes/reports");
 const adminRoutes = require("./routes/admin");
 
 const app = express();
+
+app.use(requestId);
+app.use(requestLogger);
 app.use(express.json());
 
 app.get("/health", (req, res) => {
@@ -23,13 +30,6 @@ app.use((req, res) => {
   res.status(404).json({ error: "Not found" });
 });
 
-// Never send stack traces or internal details to the client.
-app.use((err, req, res, next) => {
-  if (err && err.type === "entity.parse.failed") {
-    return res.status(400).json({ error: "Invalid JSON" });
-  }
-  console.error("Unexpected error:", err && err.message);
-  res.status(500).json({ error: "Internal server error" });
-});
+app.use(errorHandler);
 
 module.exports = app;

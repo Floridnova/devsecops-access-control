@@ -1,18 +1,20 @@
 const jwt = require("jsonwebtoken");
 const config = require("../config");
 const { findUserById } = require("../data/seed");
+const securityEvents = require("../securityEvents");
 
-function unauthorized(res) {
+function reject(req, res, reason) {
+  securityEvents.authenticationFailed(req, reason);
   return res.status(401).json({ error: "Unauthorized" });
 }
 
 function authenticate(req, res, next) {
   // Accept only "Authorization: Bearer <token>"
   const header = req.headers.authorization;
-  if (typeof header !== "string") return unauthorized(res);
+  if (typeof header !== "string") return reject(req, res, "missing_token");
 
   const match = /^Bearer ([^\s]+)$/.exec(header);
-  if (!match) return unauthorized(res);
+  if (!match) return reject(req, res, "malformed_header");
 
   let payload;
   try {
@@ -22,15 +24,18 @@ function authenticate(req, res, next) {
       audience: config.jwtAudience,
     });
   } catch (err) {
-    // missing signature, wrong key, expired, wrong issuer/audience, malformed...
-    return unauthorized(res);
+    const reason = err && err.name === "TokenExpiredError" ? "token_expired" : "invalid_token";
+    return reject(req, res, reason);
   }
 
-  if (!payload || typeof payload.sub !== "string") return unauthorized(res);
+  if (!payload || typeof payload.sub !== "string") {
+    return reject(req, res, "invalid_claims");
+  }
 
   // Identity comes from the verified token and OUR user records only.
   const user = findUserById(payload.sub);
-  if (!user || !user.active) return unauthorized(res);
+  if (!user) return reject(req, res, "unknown_user");
+  if (!user.active) return reject(req, res, "inactive_user");
 
   req.user = {
     id: user.id,

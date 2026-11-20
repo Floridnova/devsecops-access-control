@@ -2,12 +2,12 @@ const express = require("express");
 const authenticate = require("../middleware/authenticate");
 const requirePermission = require("../middleware/requirePermission");
 const { canAccessOrder } = require("../policies/orderPolicy");
+const securityEvents = require("../securityEvents");
 const { orders, findOrderById, createOrder } = require("../data/seed");
 
 const router = express.Router();
 router.use(authenticate);
 
-// Any authenticated staff member, but only orders the policy allows.
 router.get("/", (req, res) => {
   res.json(orders.filter((order) => canAccessOrder(req.user, order)));
 });
@@ -15,9 +15,13 @@ router.get("/", (req, res) => {
 router.get("/:id", requirePermission("orders:read"), (req, res) => {
   const order = findOrderById(req.params.id);
 
-  // A missing order and an order from another branch get the SAME answer (404),
-  // so nobody can use the API to find out which order ids exist elsewhere.
-  if (!order || !canAccessOrder(req.user, order)) {
+  // A missing order and another branch's order both get the same 404.
+  if (!order) {
+    return res.status(404).json({ error: "Not found" });
+  }
+  if (!canAccessOrder(req.user, order)) {
+    // The client sees 404, but WE record that someone crossed the branch line.
+    securityEvents.branchAccessDenied(req, order);
     return res.status(404).json({ error: "Not found" });
   }
   res.json(order);
@@ -41,7 +45,6 @@ router.post("/", requirePermission("orders:create"), (req, res) => {
     return res.status(400).json({ error: "Invalid order" });
   }
 
-  // The branch comes from the verified identity, never from the body.
   const order = createOrder({
     branchId: req.user.branchId,
     table,
