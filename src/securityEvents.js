@@ -1,4 +1,5 @@
 const logger = require("./logger");
+const { securityEventsTotal } = require("./metrics");
 
 function pathOf(req) {
   return String(req.originalUrl || req.url || "").split("?")[0].slice(0, 200);
@@ -7,7 +8,7 @@ function pathOf(req) {
 function emit(req, level, event, fields) {
   const target = req.log || logger;
   target[level]({ event, ip: req.ip, ...fields });
-  // Task 4 adds one line here to count the event in Prometheus.
+    securityEventsTotal.inc({ event });
 }
 
 // info: a normal, successful sign-in

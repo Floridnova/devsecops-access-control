@@ -37,7 +37,9 @@ function loadConfig() {
     jwtIssuer: readEnv("JWT_ISSUER"),
     jwtAudience: readEnv("JWT_AUDIENCE"),
     jwtExpiresIn: readEnv("JWT_EXPIRES_IN") || "15m",
-    port: Number(readEnv("PORT")) || 3000,
+        port: Number(readEnv("PORT")) || 3000,
+    metricsPort: Number(readEnv("METRICS_PORT")) || 9464,
+    metricsHost: readEnv("METRICS_HOST") || "127.0.0.1",
   });
 }
 

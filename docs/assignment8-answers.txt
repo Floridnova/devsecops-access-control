@@ -1,7 +1,7 @@
 ASSIGNMENT 8: Watching DineDesk, and Investigating the TicketHub Key Leak
 Student: Etsub
-Pull request: (paste the PR link here: module8-monitoring -> main)
-Starting point: (fill in: "my Assignment Seven API" or "the Module 8 worked example")
+Pull request: [PASTE the pull request link here: module8-monitoring -> main]
+Starting point: my Assignment Seven API (repository devsecops-access-control), extended on branch module8-monitoring
 
 All values in this file are invented. Log lines pasted below were searched
 for secrets before pasting (see Task 3, requirement 6).
@@ -198,13 +198,198 @@ problem 11 is the one that blocks the investigation itself.)
 TASK 3: Security Logging for DineDesk
 ==========================================================================
 
-(to be completed after the code is built on branch module8-monitoring)
+1. Logger
+src/logger.js uses Pino and writes one JSON object per line with timestamp
+(ISO 8601, UTC), level, service, requestId and event. Redaction replaces
+password, token, authorization, cookie, secret, jwtSecret and apiKey (also
+one level down, plus headers.authorization and headers.cookie) with
+[REDACTED]. Test: "redaction replaces password, token, authorization and
+cookie" (tests/logging.test.js).
+
+2. Request ids
+src/middleware/requestId.js gives every request an id, returns it in the
+X-Request-Id response header and stamps it on every line written with
+req.log. An incoming id is reused only if it matches ^[A-Za-z0-9-]{8,64}$;
+anything else is replaced with a new UUID, so a client cannot inject spaces
+or a newline to forge a log line. A 500 response is
+{"error":"Internal server error","requestId":"..."} and never a stack trace;
+the stack is only written to the server_error log line
+(src/middleware/errorHandler.js). Tests: "a valid incoming X-Request-Id is
+reused", "an invalid incoming X-Request-Id is replaced", "a server error's
+log line and response share the same request id".
+
+3. Security events (src/securityEvents.js)
+Each has a fixed event name and level:
+  login_succeeded         info
+  login_failed            warn   (userId only for a known account, never
+                                  the typed email or password; reason is
+                                  unknown_account, bad_password,
+                                  account_disabled or invalid_request)
+  authentication_failed   warn   (reason: missing_token, malformed_header,
+                                  token_expired, invalid_token,
+                                  invalid_claims, unknown_user,
+                                  inactive_user)
+  authorization_denied    warn   (userId, role, required)
+  branch_access_denied    warn   (userId, role, userBranchId, orderId,
+                                  orderBranchId)
+  server_error            error  (request id, error name, message, stack)
+The client always gets the same generic login error; the log records the
+real reason.
+
+4. Audit trail
+The audited action is changing a staff member's role
+(PATCH /api/admin/users/:id/role, src/routes/admin.js and src/audit.js).
+The event audit_user_role_change records actor, target, action, outcome
+(success, denied or rejected), before and after values and, for failures, a
+reason (missing_permission, unknown_user, invalid_role,
+cannot_change_own_role). Rejected attempts are recorded as well as
+successful ones (see the two audit lines in the evidence below).
+
+5. Tests
+tests/logging.test.js has 16 tests that capture the log output (a spy on
+process.stdout.write) and check it. They include: a failed login produces
+login_failed with the right fields; a 403 produces authorization_denied with
+userId and role; a cross-branch order request produces branch_access_denied;
+the audit event for success AND for a rejected attempt (a waiter, and an
+admin with an invalid role); a server error's log line and response share the
+same request id; and a test that logs in, uses the token and asserts that the
+password, the token, the JWT signing key, a bcrypt hash and "Bearer " appear
+nowhere in the captured output.
+Result of npm test:
+
+Test Suites: 3 passed, 3 total
+Tests:       41 passed, 41 total
+Snapshots:   0 total
+Time:        5.969 s
+
+6. Evidence
+I ran the API (node src/server.js) and made these requests with a
+PowerShell script: three successful logins, a failed login for a known
+account and for an unknown email, a request with no token and one with a bad
+token, a waiter calling the admin route, a Bole manager asking for a Piassa
+order, normal order and report requests, one successful and one rejected
+role change by the administrator, and a request that sends its own
+X-Request-Id. Thirteen of the resulting log lines:
+
+{"level":"info","timestamp":"2026-11-20T11:55:16.269Z","service":"dinedesk-api","requestId":"8b37fcc6-687a-4c8a-b384-0a45f8d1ddd7","event":"login_succeeded","ip":"::1","userId":2,"role":"waiter","branchId":"bole"}
+{"level":"info","timestamp":"2026-11-20T11:55:16.274Z","service":"dinedesk-api","requestId":"8b37fcc6-687a-4c8a-b384-0a45f8d1ddd7","event":"http_request","method":"POST","path":"/api/auth/login","statusCode":200,"durationMs":142.9}
+{"level":"warn","timestamp":"2026-11-20T11:55:16.613Z","service":"dinedesk-api","requestId":"85bcac17-3ff6-44f9-8c8e-bdb042ad2fb6","event":"login_failed","ip":"::1","userId":2,"reason":"bad_password"}
+{"level":"warn","timestamp":"2026-11-20T11:55:16.751Z","service":"dinedesk-api","requestId":"715bc3d5-4fc4-4eb5-bf13-2f50e9a16b2a","event":"login_failed","ip":"::1","reason":"unknown_account"}
+{"level":"warn","timestamp":"2026-11-20T11:55:16.774Z","service":"dinedesk-api","requestId":"7dcd466a-4267-4182-b5e6-fa0e79a30a7f","event":"authentication_failed","ip":"::1","reason":"missing_token","method":"GET","path":"/api/orders"}
+{"level":"warn","timestamp":"2026-11-20T11:55:16.798Z","service":"dinedesk-api","requestId":"0bc5b37e-3248-422a-8b68-2ffe41bb8974","event":"authentication_failed","ip":"::1","reason":"invalid_token","method":"GET","path":"/api/orders"}
+{"level":"warn","timestamp":"2026-11-20T11:55:16.825Z","service":"dinedesk-api","requestId":"678be734-5fec-4b78-9585-e9f29569afb9","event":"authorization_denied","ip":"::1","userId":2,"role":"waiter","required":["admin"],"method":"GET","path":"/api/admin/users"}
+{"level":"info","timestamp":"2026-11-20T11:55:16.826Z","service":"dinedesk-api","requestId":"678be734-5fec-4b78-9585-e9f29569afb9","event":"http_request","method":"GET","path":"/api/admin/users","statusCode":403,"durationMs":3.6,"userId":2}
+{"level":"warn","timestamp":"2026-11-20T11:55:16.850Z","service":"dinedesk-api","requestId":"d108844b-c2a3-49e6-bdf3-59f302d4f4e6","event":"branch_access_denied","ip":"::1","userId":4,"role":"manager","userBranchId":"bole","orderId":3,"orderBranchId":"piassa","path":"/api/orders/3"}
+{"level":"info","timestamp":"2026-11-20T11:55:16.851Z","service":"dinedesk-api","requestId":"d108844b-c2a3-49e6-bdf3-59f302d4f4e6","event":"http_request","method":"GET","path":"/api/orders/3","statusCode":404,"durationMs":2.2,"userId":4}
+{"level":"info","timestamp":"2026-11-20T11:55:16.868Z","service":"dinedesk-api","requestId":"f2ac21a5-292e-4c88-8893-482817d4f34a","event":"audit_user_role_change","action":"user_role_change","actor":{"id":1,"role":"admin"},"target":{"id":3},"outcome":"success","before":{"role":"cashier"},"after":{"role":"waiter"},"requestedRole":"waiter","ip":"::1"}
+{"level":"warn","timestamp":"2026-11-20T11:55:16.889Z","service":"dinedesk-api","requestId":"09cce7e4-55e0-4101-b8a0-3f1eba5f7fc9","event":"audit_user_role_change","action":"user_role_change","actor":{"id":1,"role":"admin"},"target":{"id":3},"outcome":"rejected","reason":"invalid_role","before":{"role":"waiter"},"after":{"role":"waiter"},"requestedRole":"superuser","ip":"::1"}
+{"level":"info","timestamp":"2026-11-20T11:55:16.893Z","service":"dinedesk-api","requestId":"demo-request-0001","event":"http_request","method":"GET","path":"/health","statusCode":200,"durationMs":0.7}
+
+What the lines show: each event line and its http_request line share one
+requestId (for example d108844b-... for the branch_access_denied and its 404);
+the failed logins have a precise internal reason but no typed email or
+password, and the unknown account has no userId; the rejected role change
+has equal before and after values (nothing changed) and records what was
+requested; and the last line reused the client's valid X-Request-Id.
+
+Before pasting I searched the whole log file for secrets with
+Select-String -SimpleMatch -Quiet. I searched for:
+  1. the JWT signing key value (read from my .env)
+  2. the demo password (demo-password-123)
+  3. the typed wrong password (wrong-password)
+  4. "eyJ" (the start of any JWT)
+  5. "Bearer" (an Authorization header)
+  6. "$2a$" (bcrypt hashes)
+  7. "@dinedesk.test" (typed email addresses)
+
 
 ==========================================================================
 TASK 4: Metrics and Alerting
 ==========================================================================
 
-(to be completed after the code is built on branch module8-monitoring)
+1. Metrics
+/metrics is served by a second Express app (src/metricsServer.js) on its own
+port, METRICS_PORT (default 9464), bound to METRICS_HOST (default
+127.0.0.1). The public API app has no /metrics route.
+
+Request to the API port (port 3000):
+[PASTE the output of: curl.exe -i http://localhost:3000/metrics
+ it should start with HTTP/1.1 404 Not Found]
+
+Two counters are exposed:
+  http_requests_total{method, route, status_code}
+  security_events_total{event}
+The route label is the route PATTERN, built from req.baseUrl and
+req.route.path in src/metrics.js. A request that matches no route uses the
+bounded label "unmatched" (or "<mount path>/*"), so ids and random URLs
+cannot create new labels. Test: "/api/orders/1 and /api/orders/2 are counted
+under ONE route label" (tests/metrics.test.js) checks that both requests are
+counted as /api/orders/:id with a value of 2, and that /api/orders/1 and
+/api/orders/2 do not appear as labels.
+Other metrics tests: the API port returns 404 for /metrics; the metrics app
+returns 200 with both counters; unknown URLs do not create new labels; a
+failed login and a cross-branch order request each increase
+security_events_total for their event.
+
+
+
+2. Alert rules (monitoring/alerts.yml)
+
+(a) DineDeskLoginAttack: a possible credential attack on logins
+  Condition    More than 10 login_failed events across the API in 2
+               minutes:
+               sum(increase(security_events_total{event="login_failed"}[2m])) > 10
+  Threshold    10 failures in 2 minutes, true for 30 seconds
+  Severity     critical
+  Destination  The on-call engineer's phone, paged through Alertmanager (I
+               did not run Alertmanager in my demo stack; Prometheus shows
+               the alert firing)
+  Response     Check the login_failed logs: is it one userId (guessing) or
+               many (password spraying)? Look for a login_succeeded from
+               the same ip right after. Lock the account or block the ip,
+               and force a password reset if a login succeeded.
+How I would choose the threshold: I would measure the normal number of
+failed logins per 2 minutes over a few weeks of real traffic (staff
+mistyping passwords) and set the threshold well above the normal peak, for
+example three times its 99th percentile. Then I would review it after two
+weeks and change it if it alarms on normal busy times or misses a slow
+attack.
+
+(b) DineDeskBranchProbing: someone probing across the branch boundary
+  Condition    More than 3 branch_access_denied events in 5 minutes:
+               sum(increase(security_events_total{event="branch_access_denied"}[5m])) > 3
+  Threshold    3 in 5 minutes, true for 30 seconds
+  Severity     warning
+  Destination  The security team's monitored chat channel and the security
+               engineer's email, with a page to the on-call engineer if it
+               continues for 15 minutes. It must not go to an unwatched
+               mailbox, which was TicketHub's mistake.
+  Response     Find the userId in the branch_access_denied logs, check
+               whether the order ids are sequential (enumeration), speak to
+               the branch manager, and suspend the account if it is not a
+               mistake.
+How I would choose the threshold: staff almost never open another branch's
+order by accident, so normal traffic should be close to zero. I would start
+low, look at the real count for two weeks, and set the threshold just above
+the highest harmless number. The rule counts only the event name; userId and
+ip are not labels because they would create too many series, so the person
+is found in the logs.
+
+3. Run it
+I ran Prometheus and Grafana with Docker (monitoring/docker-compose.yml,
+prometheus.yml, alerts.yml and a provisioned Grafana data source), generated
+traffic with a PowerShell script (30 failed logins for one account, then 10
+requests by a Bole manager for a Piassa order), and both alerts reached the
+FIRING state.
+Because Prometheus runs in a container and cannot reach a port bound to
+127.0.0.1 on my computer, I started the API with METRICS_HOST=0.0.0.0 for
+this demo only. The default stays 127.0.0.1. In production the metrics port
+should only be reachable from the monitoring network (for example by running
+Prometheus on the same private network as the API), never from the internet.
+[SCREENSHOT 1: alerts DineDeskLoginAttack and DineDeskBranchProbing in the
+ FIRING state in Prometheus (file: alert-firing.png)]
+[SCREENSHOT 2: Grafana panel "Security events per minute" showing
+ login_failed and branch_access_denied (file: grafana-panel.png)]
 
 ==========================================================================
 TASK 5: Investigate the Incident
@@ -462,4 +647,3 @@ new key issued 04:30:02; integration restored 04:45:10.
      regulators and customers. Check: written
      decision filed.
 
-Module numbers are as in my course notes (confirm before submitting).

@@ -1,0 +1,22 @@
+groups:
+  - name: dinedesk-security
+    rules:
+      # (a) Possible credential attack on logins
+      - alert: DineDeskLoginAttack
+        expr: sum(increase(security_events_total{event="login_failed"}[2m])) > 10
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 10 failed DineDesk logins in 2 minutes"
+          response: "Check login_failed logs by userId and ip; look for a login_succeeded right after; lock the account or block the IP; reset passwords if one succeeded."
+
+      # (b) Someone probing across the branch boundary
+      - alert: DineDeskBranchProbing
+        expr: sum(increase(security_events_total{event="branch_access_denied"}[5m])) > 3
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 3 cross-branch order requests in 5 minutes"
+          response: "Find the userId in the branch_access_denied logs; check whether order ids are sequential; speak to the branch manager; suspend the account if it is not a mistake."
