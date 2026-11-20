@@ -1,10 +1,8 @@
 ASSIGNMENT 7: Securing Access and Secrets in the DineDesk API
-Student: Etsub
+Student: Etsub Feleke
 Repository: devsecops-access-control (public)
 Repository link: https://github.com/Floridnova/devsecops-access-control
-Note: the repository is public, so I could not keep it private with the
-instructor as a collaborator; I am saying so here as the assignment asks.
-No real secret is committed anywhere in it; every value is invented.
+Note: the repository is public
 
 ==========================================================================
 TASK 1: Concepts
